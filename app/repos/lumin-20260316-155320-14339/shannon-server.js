@@ -157,6 +157,18 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // GET /search - Search endpoint that returns user input (for XSS testing)
+  if (req.method === 'GET' && pathname === '/search') {
+    const q = query.q || '';
+    // Return the search query in JSON response - this simulates an API that returns user input
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      query: q,
+      results: [`Search results for: ${q}`]
+    }));
+    return;
+  }
+
   // GET /fetch - SSRF vulnerability (not authz but for completeness)
   if (req.method === 'GET' && pathname === '/fetch') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -179,5 +191,6 @@ server.listen(PORT, () => {
   console.log('  GET /dashboard - 仪表板 (支持 X-Auth-Status 绕过)');
   console.log('  GET /user/lookup?id=X - 用户查询 (IDOR)');
   console.log('  GET /user/search?username=X - 用户搜索 (IDOR/SQLi)');
+  console.log('  GET /search?q=X - 搜索 (返回用户输入)');
   console.log('  GET /fetch?url=X - URL获取 (SSRF)');
 });
